@@ -417,6 +417,7 @@ class SingleControllerActor:
         )
         self._ppo_group_multiple = actor_args.ppo_group_multiple
         self._ppo_min_remaining_groups = actor_args.ppo_min_remaining_groups
+        self._grpo_group_multiple = actor_args.grpo_group_multiple
         # GRPO has no epoch knob: it makes one optimizer step per RL step.
         self._ppo_epochs: int = self._algo_cfg.ppo_epochs if self._is_ppo else 1
         self._critic_ppo_epochs: int = (
@@ -2795,6 +2796,8 @@ class SingleControllerActor:
             if self._streaming_ppo
             else {}
         )
+        if not self._is_ppo and self._grpo_group_multiple > 1:
+            selection_kwargs["group_multiple"] = self._grpo_group_multiple
 
         while self._train_steps < self._algo_cfg.max_num_steps:
             maybe_gpu_profile_step(self._trainer, self._train_steps + 1)
