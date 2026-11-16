@@ -786,6 +786,9 @@ Use the capture as a context manager, or always call `release()` in `finally`.
 `persist()` is single-attempt, including after a partial failure. Reusing the
 handle raises a clear error; release it, discard the failed directory, and
 capture again. Exclusive file creation remains an overwrite guard.
+`persist(extra_metadata=...)` adds metadata known only after capture, such as the
+digest of state serialized once the barrier opened, to the completion marker; it
+must not repeat a captured key.
 
 ```python
 capture = client.capture_checkpoint(checkpoint_dir, metadata=metadata)
@@ -816,8 +819,15 @@ bash tests/functional/data_plane_simple_checkpoint_cpu.sh
 With `data_plane.simple.async_checkpoint: true`, `RolloutSnapshotter` captures
 the TQ view and matching controller metadata under its mutation barrier, then
 resumes the environment and dispatch before persisting the retained shards.
-Recovery validation and controller serialization remain inside capture. The
-snapshot is published only after persistence and all recovery sidecars finish.
+Inside the barrier, the replay and staging inventory checks, the recovery-state
+build and the TQ capture run concurrently: nothing they read can change while
+the barrier is held. The recovery state is then serialized and hashed after
+resume, and its digest reaches the TQ metadata through `persist(extra_metadata=...)`.
+The snapshot is published only after persistence and all recovery sidecars finish.
+Backends without a retained view serialize and save inside the barrier, as before.
+
+The inventory checks list TQ keys through the patched controller's
+`nrl_list_keys`, which omits the per-key custom metadata that `KV_LIST` returns.
 
 Full trainer checkpoints use the same retained-view path when
 `checkpointing.save_data_plane: true`. Capture and validation run under the
@@ -848,17 +858,18 @@ The `timing/rollout_checkpoint` metrics split `tq_capture_seconds`,
 and persistence. Compare these with `environment_paused_seconds` and
 `exclusive_hold_seconds` to measure time removed from the pause.
 
-The rest of the barrier hold is split into the checks and recovery state that
-stay inside it:
+The recovery checks and state are timed per phase:
 
-| Metric | Phase |
-|---|---|
-| `replay_inventory_seconds` | Compare TQ replay keys with the replay index |
-| `recovery_state_build_seconds` | Copy and validate the rollout-recovery ledger |
-| `recovery_state_serialize_seconds` | `torch.save` and sha256 of that state |
-| `staging_inventory_seconds` | Compare TQ staging keys with recovery ownership |
+| Metric | Phase | When |
+|---|---|---|
+| `replay_inventory_seconds` | Compare TQ replay keys with the replay index | Under the barrier |
+| `recovery_state_build_seconds` | Copy and validate the rollout-recovery ledger | Under the barrier |
+| `staging_inventory_seconds` | Compare TQ staging keys with recovery ownership | Under the barrier |
+| `recovery_state_serialize_seconds` | `torch.save` and sha256 of that state | After resume with a retained view; under the barrier otherwise |
 
-A phase that does not run for the configuration logs 0.
+The three barrier phases and `tq_capture_seconds` overlap, so the hold is close
+to the longest of them, not their sum. A phase that does not run for the
+configuration logs 0.
 
 ## Async path (proposed)
 
