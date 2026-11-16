@@ -21,9 +21,13 @@ The stock ``FieldMeta.remove_samples`` rescans every remaining shape of a nested
 clear, so ``CLEAR_META`` grows with the number of live samples. ``remove_samples`` below rescans
 only after ``RESCAN_REMOVED_FRACTION`` of them is gone.
 
-The controller is a Ray actor, so both are applied in a subclass started by ``tq.init``.
+The stock ``KV_LIST`` request returns every key with its custom metadata. ``list_keys`` below,
+exposed as the actor method ``nrl_list_keys``, returns only the keys for inventory checks that
+compare key sets; it is NeMo-RL-only and has no upstream counterpart.
 
-Delete this module once the pinned TransferQueue includes both changes, proposed upstream on
+The controller is a Ray actor, so all three are applied in a subclass started by ``tq.init``.
+
+Delete the two overrides once the pinned TransferQueue includes both changes, proposed upstream on
 https://github.com/ZhiyuLi-Nvidia/TransferQueue/tree/perf/throttle-nested-shape-rescan.
 """
 
@@ -144,6 +148,13 @@ def remove_samples(self, indexes: list[int]) -> None:
                 self.per_sample_shapes.clear()
 
 
+def list_keys(self, partition_id: str) -> list[str]:
+    """Keys of one partition without their custom metadata; ``[]`` if it does not exist."""
+    partition = self.partitions.get(partition_id)
+    # list() copies the mapping in one C call, so the ZMQ thread cannot resize it mid-copy.
+    return [] if partition is None else list(partition.keys_mapping)
+
+
 def patch_field_meta() -> None:
     """Install ``remove_samples`` on ``FieldMeta`` in this process; the controller calls it on start."""
     FieldMeta.remove_samples = remove_samples
@@ -167,13 +178,14 @@ def assert_stock_tq_version() -> None:
 
 
 def make_patched_controller(actor_class: Any) -> Any:
-    """Return a Ray actor class that runs the controller with both overrides."""
+    """Return a Ray actor class that runs the controller with both overrides and ``nrl_list_keys``."""
     assert_stock_tq_version()
     base = actor_class.__ray_metadata__.modified_class
 
     class PatchedController(base):
         _nrl_kv_meta_patched = True
         kv_retrieve_meta = kv_retrieve_meta
+        nrl_list_keys = list_keys
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             patch_field_meta()
