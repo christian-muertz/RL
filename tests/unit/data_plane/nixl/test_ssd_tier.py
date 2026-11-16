@@ -247,7 +247,9 @@ def test_a_failed_write_keeps_the_only_copy_and_the_ticker_retries(
         queued = u._submit_due_spills(time.monotonic())  # too soon: not yet
     assert queued == 0 and not rec.staging
     with u._mu:
-        queued = u._submit_due_spills(time.monotonic() + nixl_storage_unit.SPILL_RETRY_S)
+        queued = u._submit_due_spills(
+            time.monotonic() + nixl_storage_unit.SPILL_RETRY_S
+        )
     assert queued == 1
     _wait(lambda: rec.disk is not None)
     assert not rec.spill_due and u.stats()["spill_retries"] == 1
@@ -542,6 +544,27 @@ def test_checkpoint_copies_a_published_spill_from_its_io_copy(tmp_path, monkeypa
     assert set(_value((tmp_path / "s").read_bytes()[off : off + n])) == {9}
 
 
+def test_a_held_io_copy_is_not_evicted_while_the_checkpoint_copies_it(tmp_path):
+    """save_shard holds a spill's IO copy while it copies it. The spill's file
+    write can end during that copy, which turns the region into a staged copy
+    that eviction may reuse; the hold must keep it in place."""
+    u = _unit(tmp_path / "u")
+    _fill(u)
+    _put(u, "s", 9)  # spilled; its file is written, the IO copy stays staged
+    rec = u.blobs["s"]
+    assert rec.disk is not None and rec.staged_off is not None and rec.picked_up
+    rec.holds += 1  # what save_shard does around its copy
+    _put(u, "t", 10)  # takes the IO area's second region
+    assert set(_value(bytes(u.slab[u.staging_base + rec.staged_off :][:BLOB]))) == {9}
+    _put(u, "v", 11)  # needs room: must evict t, never the held s
+    assert rec.staged_off is not None and u.blobs["t"].staged_off is None
+    assert set(_value(bytes(u.slab[u.staging_base + rec.staged_off :][:BLOB]))) == {9}
+    rec.holds -= 1
+    with u._mu:
+        u._evict_staged(BLOB, time.monotonic())
+    assert rec.staged_off is None  # evictable again once the copy is done
+
+
 def test_restore_spills_only_when_asked_and_reads_back(tmp_path):
     src = _unit(tmp_path / "a")
     _spilled(src)
@@ -622,7 +645,9 @@ def test_ssd_config_validation():
         "pickup_s": 10.0,
         "io_threads": 4,
     }
-    assert tq_nixl.ssd_config({**on, "ssd": {**ssd, "io_threads": 8}})["io_threads"] == 8
+    assert (
+        tq_nixl.ssd_config({**on, "ssd": {**ssd, "io_threads": 8}})["io_threads"] == 8
+    )
     with pytest.raises(ValueError, match="pickup_s"):
         tq_nixl.ssd_config({**on, "ssd": {**ssd, "pickup_s": 1.0}})
     with pytest.raises(ValueError, match="staging_bytes"):
